@@ -30,83 +30,86 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "decode_block.h"
 #include "common_block.h"
 #include "common_frame.h"
+#include "temporal_interp.h"
 
 extern int chroma_qp[52];
 
-void clpf_frame(decoder_info_t *decoder_info){
-
-  /* Constrained low-pass filter (CLPF) */
-  stream_t *stream = decoder_info->stream;
-  frame_type_t frame_type = decoder_info->frame_info.frame_type;
-  int height = decoder_info->height;
-  int width = decoder_info->width;
-  int xpos,ypos,index,filter_flag,filter;
-  int k,l,x0,x1,y0,y1;
-  int num_sb_hor = width/MAX_BLOCK_SIZE;
-  int num_sb_ver = height/MAX_BLOCK_SIZE;
-
-  uint8_t *recY = decoder_info->rec->y;
-  uint8_t *recU = decoder_info->rec->u;
-  uint8_t *recV = decoder_info->rec->v;
-  int stride_y = decoder_info->rec->stride_y;
-  int stride_c = decoder_info->rec->stride_c;
-
-  int bit_start = stream->bitcnt;
-  for (k=0;k<num_sb_ver;k++){
-    for (l=0;l<num_sb_hor;l++){
-      xpos = l*MAX_BLOCK_SIZE;
-      ypos = k*MAX_BLOCK_SIZE;
-      index = (ypos/MIN_PB_SIZE)*(width/MIN_PB_SIZE) + (xpos/MIN_PB_SIZE);
-      filter_flag = decoder_info->deblock_data[index].size < 64 ||
-                    decoder_info->deblock_data[index].mode != MODE_SKIP ||
-                    decoder_info->deblock_data[index].mvb.x0 != 0 ||
-                    decoder_info->deblock_data[index].mvb.y0 != 0;
-      if (filter_flag){
-        filter = getbits(stream,1);
-        if (filter){
-          /* Y */
-          x0 = max(1,xpos);
-          x1 = min(width-1,xpos+MAX_BLOCK_SIZE);
-          y0 = max(1,ypos);
-          y1 = min(height-1,ypos+MAX_BLOCK_SIZE);
-          clpf_block(recY,x0,x1,y0,y1,stride_y);
-
-          /* C */
-          x0 = max(1,xpos/2);
-          x1 = min(width/2-1,(xpos+MAX_BLOCK_SIZE)/2);
-          y0 = max(1,ypos/2);
-          y1 = min(height/2-1,(ypos+MAX_BLOCK_SIZE)/2);
-          clpf_block(recU,x0,x1,y0,y1,stride_c);
-          clpf_block(recV,x0,x1,y0,y1,stride_c);
-        } //if (filter)
-      } //if (filter_flag)
-    }
-  }
-  decoder_info->bit_count.clpf[frame_type] += (stream->bitcnt - bit_start);
+static int clpf_true(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, void *stream) {
+  return 1;
 }
 
-void decode_frame(decoder_info_t *decoder_info)
+static int clpf_bit(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, void *stream) {
+  return getbits((stream_t*)stream, 1);
+}
+
+void decode_frame(decoder_info_t *decoder_info, yuv_frame_t* rec_buffer)
 {
   int height = decoder_info->height;
   int width = decoder_info->width;
-  int k,l;
+  int k,l,r;
   int num_sb_hor = (width + MAX_BLOCK_SIZE - 1)/MAX_BLOCK_SIZE;
   int num_sb_ver = (height + MAX_BLOCK_SIZE - 1)/MAX_BLOCK_SIZE;
   stream_t *stream = decoder_info->stream;
+  memset(decoder_info->deblock_data, 0, ((height/MIN_PB_SIZE) * (width/MIN_PB_SIZE) * sizeof(deblock_data_t)) );
 
   int bit_start = stream->bitcnt;
+  int rec_buffer_idx;
 
   decoder_info->frame_info.frame_type = getbits(stream,1);
+  decoder_info->bit_count.stat_frame_type = decoder_info->frame_info.frame_type;
   int qp = getbits(stream,8);
   decoder_info->frame_info.num_intra_modes = getbits(stream,4);
 
-  int r;
-  for (r=0;r<decoder_info->frame_info.num_ref;r++){
-    decoder_info->frame_info.ref_array[r] = getbits(stream,4);
+  decoder_info->frame_info.interp_ref = 0;
+  if (decoder_info->frame_info.frame_type != I_FRAME) {
+    decoder_info->frame_info.num_ref = getbits(stream,2)+1;
+    int r;
+    for (r=0;r<decoder_info->frame_info.num_ref;r++){
+      decoder_info->frame_info.ref_array[r] = getbits(stream,6)-1;
+      if (decoder_info->frame_info.ref_array[r]==-1)
+        decoder_info->frame_info.interp_ref = 1;
+    }
+    if (decoder_info->frame_info.num_ref==2 && decoder_info->frame_info.ref_array[0]==-1) {
+      decoder_info->frame_info.ref_array[decoder_info->frame_info.num_ref++] = getbits(stream,5)-1;
+    }
+  } else {
+    decoder_info->frame_info.num_ref = 0;
+  }
+  decoder_info->frame_info.display_frame_num = getbits(stream,16);
+  for (r=0; r<decoder_info->frame_info.num_ref; ++r){
+    if (decoder_info->frame_info.ref_array[r]!=-1) {
+      if (decoder_info->ref[decoder_info->frame_info.ref_array[r]]->frame_num > decoder_info->frame_info.display_frame_num) {
+        decoder_info->bit_count.stat_frame_type = B_FRAME;
+      }
+    }
   }
 
-  decoder_info->bit_count.frame_header[decoder_info->frame_info.frame_type] += (stream->bitcnt - bit_start);
-  decoder_info->bit_count.frame_type[decoder_info->frame_info.frame_type] += 1;
+  rec_buffer_idx = decoder_info->frame_info.display_frame_num%MAX_REORDER_BUFFER;
+  decoder_info->rec = &rec_buffer[rec_buffer_idx];
+  decoder_info->rec->frame_num = decoder_info->frame_info.display_frame_num;
+
+  if (decoder_info->frame_info.num_ref>2 && decoder_info->frame_info.ref_array[0]==-1) {
+    // interpolate from the other references
+    yuv_frame_t* ref1=decoder_info->ref[decoder_info->frame_info.ref_array[1]];
+    yuv_frame_t* ref2=decoder_info->ref[decoder_info->frame_info.ref_array[2]];
+    int display_frame_num = decoder_info->frame_info.display_frame_num;
+    int off1 = ref2->frame_num - display_frame_num;
+    int off2 = display_frame_num - ref1->frame_num;
+    if (off1 < 0 && off2 < 0) {
+      off1 = -off1;
+      off2 = -off2;
+    }
+    if (off1 == off2) {
+      off1 = off2 = 1;
+    }
+    // FIXME: won't work for the 1-sided case
+    interpolate_frames(decoder_info->interp_frames[0], ref1, ref2, off1+off2 , off2);
+    pad_yuv_frame(decoder_info->interp_frames[0]);
+    decoder_info->interp_frames[0]->frame_num = display_frame_num;
+  }
+
+  decoder_info->bit_count.frame_header[decoder_info->bit_count.stat_frame_type] += (stream->bitcnt - bit_start);
+  decoder_info->bit_count.frame_type[decoder_info->bit_count.stat_frame_type] += 1;
   decoder_info->frame_info.qp = qp;
   decoder_info->frame_info.qpb = qp;
 
@@ -118,16 +121,17 @@ void decode_frame(decoder_info_t *decoder_info)
     }
   }
 
+  qp = decoder_info->frame_info.qp = decoder_info->frame_info.qpb;
+
   if (decoder_info->deblocking){
     deblock_frame_y(decoder_info->rec, decoder_info->deblock_data, width, height, qp);
     int qpc = chroma_qp[qp];
     deblock_frame_uv(decoder_info->rec, decoder_info->deblock_data, width, height, qpc);
   }
 
-  if (decoder_info->clpf){
-    if ((decoder_info->frame_info.display_frame_num%CLPF_PERIOD)==0){
-      clpf_frame(decoder_info);
-    }
+  if (decoder_info->clpf && getbits(stream, 1)){
+    clpf_frame(decoder_info->rec, 0, decoder_info->deblock_data, stream,
+               getbits(stream, 1) ? clpf_true : clpf_bit);
   }
 
   /* Sliding window operation for reference frame buffer by circular buffer */

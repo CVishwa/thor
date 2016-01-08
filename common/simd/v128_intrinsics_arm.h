@@ -443,12 +443,20 @@ SIMD_INLINE v128 v128_cmpgt_s8(v128 x, v128 y) {
   return vreinterpretq_s64_u8(vcgtq_s8(vreinterpretq_s8_s64(x), vreinterpretq_s8_s64(y)));
 }
 
+SIMD_INLINE v128 v128_cmplt_s8(v128 x, v128 y) {
+  return vreinterpretq_s64_u8(vcltq_s8(vreinterpretq_s8_s64(x), vreinterpretq_s8_s64(y)));
+}
+
 SIMD_INLINE v128 v128_cmpeq_8(v128 x, v128 y) {
   return vreinterpretq_s64_u8(vceqq_u8(vreinterpretq_u8_s64(x), vreinterpretq_u8_s64(y)));
 }
 
 SIMD_INLINE v128 v128_cmpgt_s16(v128 x, v128 y) {
   return vreinterpretq_s64_u16(vcgtq_s16(vreinterpretq_s16_s64(x), vreinterpretq_s16_s64(y)));
+}
+
+SIMD_INLINE v128 v128_cmplt_s16(v128 x, v128 y) {
+  return vreinterpretq_s64_u16(vcltq_s16(vreinterpretq_s16_s64(x), vreinterpretq_s16_s64(y)));
 }
 
 SIMD_INLINE v128 v128_cmpeq_16(v128 x, v128 y) {

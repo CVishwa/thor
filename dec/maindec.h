@@ -41,15 +41,14 @@ typedef struct
   int num_intra_modes;
   int decode_order_frame_num;
   int display_frame_num;
+  int interp_ref;
 } frame_info_t;
 
 typedef struct
 {
   block_pos_t block_pos;
-  pred_data_t pred_data;
+  block_param_t block_param;
   int num_skip_vec;
-  mvr_t mvr_skip[MAX_NUM_SKIP];
-  int tb_split;
   cbp_t cbp;
   int16_t *coeffq_y;
   int16_t *coeffq_u;
@@ -62,6 +61,7 @@ typedef struct
     frame_info_t frame_info;
     yuv_frame_t *rec;
     yuv_frame_t *ref[MAX_REF_FRAMES];
+    yuv_frame_t *interp_frames[MAX_SKIP_FRAMES];
     stream_t *stream;
     deblock_data_t *deblock_data;
     int width;
@@ -69,7 +69,7 @@ typedef struct
     bit_count_t bit_count;
     int pb_split;
     int max_num_ref;
-    int num_reorder_pics;
+    int interp_ref;
     int max_delta_qp;
     int deblocking;
     int clpf;

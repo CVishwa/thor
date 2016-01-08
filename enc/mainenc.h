@@ -30,45 +30,67 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <stdio.h>
 #include "putbits.h"
 #include "types.h"
+#include "rc.h"
 
 typedef struct
 {
-    unsigned int width;
-    unsigned int height;
-    unsigned int qp;
-    char *infilestr;
-    char *outfilestr;
-    char *reconfilestr;
-    char *statfilestr;
-    unsigned int file_headerlen;
-    unsigned int frame_headerlen;
-    unsigned int num_frames;
-    int skip;
-    float frame_rate;
-    float lambda_coeffI;
-    float lambda_coeffP;
-    float lambda_coeffB;
-    float early_skip_thr;
-    int enable_tb_split;
-    int enable_pb_split;
-    int max_num_ref;
-    int HQperiod;
-    int num_reorder_pics;
-    int dqpP;
-    int dqpB;
-    float mqpP;
-    float mqpB;
-    int dqpI;
-    int intra_period;
-    int intra_rdo;
-    int rdoq;
-    int max_delta_qp;
-    int encoder_speed;
-    int deblocking;
-    int clpf;
-    int snrcalc;
-    int use_block_contexts;
-    int enable_bipred;
+  unsigned int width;
+  unsigned int height;
+  unsigned int qp;
+  char *infilestr;
+  char *outfilestr;
+  char *reconfilestr;
+  char *statfilestr;
+  unsigned int file_headerlen;
+  unsigned int frame_headerlen;
+  unsigned int num_frames;
+  int skip;
+  float frame_rate;
+  float lambda_coeffI;
+  float lambda_coeffP;
+  float lambda_coeffB;
+  float lambda_coeffB0;
+  float lambda_coeffB1;
+  float lambda_coeffB2;
+  float lambda_coeffB3;
+  float early_skip_thr;
+  int enable_tb_split;
+  int enable_pb_split;
+  int max_num_ref;
+  int HQperiod;
+  int num_reorder_pics;
+  int dyadic_coding;
+  int interp_ref;
+  int dqpP;
+  int dqpB;
+  int dqpB0;
+  int dqpB1;
+  int dqpB2;
+  int dqpB3;
+  float mqpP;
+  float mqpB;
+  float mqpB0;
+  float mqpB1;
+  float mqpB2;
+  float mqpB3;
+  int dqpI;
+  int intra_period;
+  int intra_rdo;
+  int rdoq;
+  int max_delta_qp;
+  int delta_qp_step;
+  int encoder_speed;
+  int sync;
+  int deblocking;
+  int clpf;
+  int snrcalc;
+  int use_block_contexts;
+  int enable_bipred;
+  int bitrate;
+  int max_qp;
+  int min_qp;
+  int max_qpI;
+  int min_qpI;
 } enc_params;
 
 typedef struct
@@ -83,19 +105,22 @@ typedef struct
   block_pos_t block_pos;
   yuv_block_t *rec_block;
   yuv_block_t *org_block;
-  pred_data_t pred_data;
+  block_param_t block_param;
+  inter_pred_t skip_candidates[MAX_NUM_SKIP];
+  inter_pred_t merge_candidates[MAX_NUM_MERGE];
+  inter_pred_t inter_block_param[4]; //inter prediction parameters for up to 4 PB in a CB
   int num_skip_vec;
-  mvb_t mvb_skip[MAX_NUM_SKIP];
   int num_merge_vec;
-  mvb_t mvb_merge[MAX_NUM_SKIP];
   mv_t mvp;
   int tb_param;
   int max_num_pb_part;
   int max_num_tb_part;
-  cbp_t cbp;
   int delta_qp;
   block_context_t *block_context;
   int final_encode;
+  yuv_block_t *rec_block_best;
+  double lambda;
+  int qp;
 } block_info_t; //TODO: Consider merging with block_pos_t
 
 
@@ -104,7 +129,11 @@ typedef struct
   frame_type_t frame_type;
   uint8_t qp;
   int num_ref;
+  int best_ref;
   int ref_array[MAX_REF_FRAMES];
+  mv_t mvcand[MAX_REF_FRAMES][64];
+  int mvcand_num[MAX_REF_FRAMES];
+  uint64_t mvcand_mask[MAX_REF_FRAMES];
   double lambda;
   int num_intra_modes;
   int frame_num;
@@ -112,6 +141,10 @@ typedef struct
   int ur[9][9];
   int dl[9][9];
 #endif
+  int interp_ref;
+  int b_level;
+  double lambda_coeff;
+  int prev_qp;
 } frame_info_t;
 
 typedef struct 
@@ -122,8 +155,10 @@ typedef struct
   yuv_frame_t *orig;
   yuv_frame_t *rec;
   yuv_frame_t *ref[MAX_REF_FRAMES];
+  yuv_frame_t *interp_frames[MAX_SKIP_FRAMES];
   stream_t *stream;
   deblock_data_t *deblock_data;
+  rate_control_t *rc;
   int width;
   int height;
   int depth;

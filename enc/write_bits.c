@@ -68,13 +68,13 @@ void write_mv(stream_t *stream,mv_t *mv,mv_t *mvp)
 
 }
 
-int find_code(int run, int level, int maxrun, int type,int eob){
+int find_code(int run, int level, int maxrun, int chroma_flag,int eob){
 
   int cn,index;
   int maxrun2 = max(4,maxrun);
   index = run + (level>1)*(maxrun2+1);
 
-  if (type){
+  if (chroma_flag){
     if (eob)
       cn = 0;
     else if (index<=4)
@@ -115,9 +115,11 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
   unsigned int cn;
   int level,vlc,sign,last_pos;
   int maxrun,run;
-  int vlc_adaptive=0;
   int N = qsize*qsize;
   int level_mode;
+  int chroma_flag = type&1;
+  int intra_flag = (type>>1)&1;
+  int vlc_adaptive = intra_flag && !chroma_flag;
 
   /* Zigzag scan */
   int *zigzagptr = zigzag64;
@@ -143,7 +145,7 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
 
   /* Use one bit to signal chroma/last_pos=1/level=1 */
   pos = 0;
-  if (type==1){
+  if (chroma_flag){
     if (last_pos==0 && abs(scoeff[0])==1){
       putbits(1,1,stream);
       sign = (scoeff[0] < 0) ? 1 : 0;
@@ -161,7 +163,6 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
   while (pos <= last_pos){ //Outer loop for forward scan
     if (level_mode){
       /* Level-mode */
-      //vlc_adaptive = (level > 3 && type==0) ? 1 : 0;
       while (pos <= last_pos && level > 0){
         c = scoeff[pos];
         level = abs(c);
@@ -171,7 +172,7 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
           putbits(1,sign,stream);
           len += 1;
         }
-        if (type==0)
+        if (chroma_flag==0)
           vlc_adaptive = level > 3;
         pos++;
       }
@@ -191,9 +192,9 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
         sign = (c < 0) ? 1 : 0;
 
         /* Code combined event of run and (level>1) */
-        cn = find_code(run, level, maxrun, type, 0);
+        cn = find_code(run, level, maxrun, chroma_flag, 0);
 
-        if (type && size <= 8){
+        if (chroma_flag && size <= 8){
           vlc = 10;
           len = put_vlc(vlc,cn,stream);
         }
@@ -215,7 +216,6 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
         run = 0;
       }
       pos++;
-      //vlc_adaptive = (level > 3 && type==0) ? 1 : 0;
       level_mode = level > 1; //Set level_mode
     } //while (c==0 && pos < last_pos)
   } //while (pos <= last_pos){
@@ -237,8 +237,8 @@ void write_coeff(stream_t *stream,int16_t *coeff,int size,int type)
 
   /* EOB */
   if (pos < N){
-    cn = find_code(0, 0, 0, type, 1);
-    if (type && size <= 8){
+    cn = find_code(0, 0, 0, chroma_flag, 1);
+    if (chroma_flag && size <= 8){
       vlc = 0;
       put_vlc(vlc,cn,stream);
     }
@@ -264,151 +264,120 @@ int write_delta_qp(stream_t *stream, int delta_qp){
   return len;
 }
 
-#if NEW_BLOCK_STRUCTURE
-void write_super_mode(stream_t *stream,write_data_t *write_data){
 
-  int size = write_data->size;
-  block_mode_t mode = write_data->mode;
-  frame_type_t frame_type = write_data->frame_type;
-  if (frame_type!=I_FRAME && write_data->encode_rectangular_size==0){
-    int num_split_codes = 2*(size==MAX_BLOCK_SIZE);
-    int code=0,maxbit,mode_offset,ref_offset;
-    mode_offset = 2 + num_split_codes;
-    maxbit = write_data->num_ref + 2 + num_split_codes;
-    if (write_data->num_ref>1 && write_data->enable_bipred) maxbit += 1;
+void write_super_mode(stream_t *stream,encoder_info_t *encoder_info, block_info_t *block_info, block_param_t *block_param,int split_flag){
 
-    if (mode==MODE_SKIP){
-      code = 0;
-    }
-    else if (mode==MODE_MERGE){
-      code = mode_offset - 1;
-    }
-    else if (mode==MODE_INTRA){
-      code = mode_offset + 1;
-    }
-    else if (mode==MODE_INTER){
-      ref_offset = write_data->ref_idx==0 ? 0 : write_data->ref_idx + 1;
-      code = mode_offset + ref_offset;
-    }
-    else if (mode==MODE_BIPRED){
-      code = maxbit;
-    }
-
-    /* Switch MERGE and INTER-R0 */ //TODO: Integrate with code above
-    if (code==2)
-      code = 3;
-    else if(code==3)
-      code = 2;
-
-    if (write_data->block_context->index==2 || write_data->block_context->index>3){
-      if (size>MIN_BLOCK_SIZE && code<3)
-        code = (code+2)%3;
-    }
-
-    if (code==maxbit)
-      putbits(maxbit,0,stream);
-    else
-      putbits(code+1,1,stream);
-
-  }
-}
-#else
-void write_super_mode(stream_t *stream,write_data_t *write_data){
-
-  int size = write_data->size;
-  block_mode_t mode = write_data->mode;
-  frame_type_t frame_type = write_data->frame_type;
+  int size = block_info->block_pos.size;
+  block_mode_t mode = block_param->mode;
+  frame_type_t frame_type = encoder_info->frame_info.frame_type;
   if (frame_type!=I_FRAME){
-    int code=0,maxbit;
-    maxbit = write_data->num_ref + 2 + (size>MIN_BLOCK_SIZE);
-    if (write_data->num_ref>1 && write_data->enable_bipred) maxbit += 1;
+    if (split_flag == 1) {
+      if (size > MAX_TR_SIZE) {
+        putbits(1, 0, stream);
+      }
+      else {
+        int code = 1;
+        if (block_info->block_context->index == 2 || block_info->block_context->index>3)
+          code = (code + 3) % 4;
+        putbits(code + 1, 1, stream);
+      }
+      return;
+    }
 
-    if (size>MIN_BLOCK_SIZE){
+    int code = 0, maxbit;
+    int bipred_possible_flag = encoder_info->frame_info.num_ref > 1 && encoder_info->params->enable_bipred;
+    int split_possible_flag = size > MIN_BLOCK_SIZE;
+    int interp_ref = encoder_info->frame_info.interp_ref;
+    maxbit = 2 + encoder_info->frame_info.num_ref + split_possible_flag + bipred_possible_flag;
+    if (interp_ref) {
       if (mode==MODE_SKIP)
         code = 0;
-      else if (mode==MODE_INTER && write_data->ref_idx==0)
-        code = 2;
       else if (mode==MODE_MERGE)
+        code = 2;
+      else if (mode == MODE_BIPRED)
         code = 3;
-      else if (mode==MODE_INTRA)
+      else if (mode == MODE_INTRA)
         code = 4;
-      else if (mode==MODE_INTER && write_data->ref_idx>0)
-        code = 4 + write_data->ref_idx;
-      else if (mode==MODE_BIPRED)
-        code = 4 + write_data->num_ref;
-#if NO_SUBBLOCK_SKIP
-      if (size < MAX_BLOCK_SIZE){
-        if (code==2) code = 3;
-        else if (code==3) code = 2;
+      else if (mode == MODE_INTER && block_param->ref_idx0 > 0)
+        code = 4 + block_param->ref_idx0;
+      else {
+        assert(mode == MODE_INTER && block_param->ref_idx0 == 0);
+        code = 4 + encoder_info->frame_info.num_ref;
       }
-#endif
-    }
-    else{
+      if (!bipred_possible_flag && code > 3) {
+        /* Don't need a codeword for bipred so fill the empty slot */
+        code = code - 1;
+      }
+
+      if (!split_possible_flag && code > 1) {
+        /* Don't need a codeword for split so fill the empty slot */
+        code = code - 1;
+      }
+      if ((block_info->block_context->index == 2 || block_info->block_context->index>3) && size>MIN_BLOCK_SIZE) {
+        /* Skip is less likely than split, merge and inter-ref_idx=0 so move skip down the list */
+        if (code<3)
+          code = (code+2)%3;
+      }
+
+    } else {
       if (mode==MODE_SKIP)
         code = 0;
-#if 9
-      else if (mode==MODE_INTER && write_data->ref_idx==0)
-        code = 1;
-      else if (mode==MODE_MERGE)
+      else if (mode == MODE_INTER && block_param->ref_idx0 == 0)
         code = 2;
-      else if (mode==MODE_INTRA)
-        code = 3;
-#else
-      else if (mode==MODE_INTER && write_data->ref_idx==0)
-        code = 3;
       else if (mode==MODE_MERGE)
-        code = 1;
-      else if (mode==MODE_INTRA)
-        code = 2;
-#endif
-      else if (mode==MODE_INTER && write_data->ref_idx>0)
-        code = 3 + write_data->ref_idx;
-      else if (mode==MODE_BIPRED)
-        code = 3 + write_data->num_ref;
-#if NO_SUBBLOCK_SKIP
-      if (size < MAX_BLOCK_SIZE){
-        if (code==1) code = 2;
-        else if (code==2) code = 1;
-      }
-#endif
-    }
+        code = 3;
+      else if (mode == MODE_BIPRED)
+        code = 4;
+      else if (mode == MODE_INTRA)
+        code = 5;
+      else if (mode == MODE_INTER && block_param->ref_idx0>0)
+        code = 5 + block_param->ref_idx0;
 
-    if (write_data->block_context->index==2 || write_data->block_context->index>3){
-      if (size>MIN_BLOCK_SIZE && code<4)
-        code = (code+3)%4;
+      if (!bipred_possible_flag && code > 4) {
+        /* Don't need a codeword for bipred so fill the empty slot */
+        code = code - 1;
+      }
+
+      if (!split_possible_flag && code > 1) {
+        /* Don't need a codeword for split so fill the empty slot */
+        code = code - 1;
+      }
+      if ((block_info->block_context->index == 2 || block_info->block_context->index>3) && size>MIN_BLOCK_SIZE) {
+        /* Skip is less likely than split, merge and inter-ref_idx=0 so move skip down the list */
+        if (code<4)
+          code = (code+3)%4;
+      }
     }
 
     if (code==maxbit)
       putbits(maxbit,0,stream);
     else
       putbits(code+1,1,stream);
-
   }
   else{
-    putbits(1,0,stream); // To signal split_flag = 0
+    /* Split flag = 0 */
+    if (size > MIN_BLOCK_SIZE || split_flag==1)
+      putbits(1,split_flag,stream);
   }
 }
-#endif
 
-int write_block(stream_t *stream,write_data_t *write_data){
+int write_block(stream_t *stream,encoder_info_t *encoder_info, block_info_t *block_info, block_param_t *block_param){
 
   int start_bits,end_bits;
-  int size = write_data->size;
 
-  int tb_split = write_data->tb_part;
+  int size = block_info->block_pos.size;
+  int tb_split = block_param->tb_split;
 
-  uint8_t cbp_y = write_data->cbp->y;
-  uint8_t cbp_u = write_data->cbp->u;
-  uint8_t cbp_v = write_data->cbp->v;
-
-  int16_t *coeffq_y = write_data->coeffq_y;
-  int16_t *coeffq_u = write_data->coeffq_u;
-  int16_t *coeffq_v = write_data->coeffq_v;
-
-  block_mode_t mode = write_data->mode;
-  intra_mode_t intra_mode = write_data->intra_mode;
-
-  mv_t mvp = write_data->mvp;
+  uint8_t cbp_y = block_param->cbp.y;
+  uint8_t cbp_u = block_param->cbp.u;
+  uint8_t cbp_v = block_param->cbp.v;
+  int16_t *coeffq_y = block_param->coeff_y;
+  int16_t *coeffq_u = block_param->coeff_u;
+  int16_t *coeffq_v = block_param->coeff_v;
+  block_mode_t mode = block_param->mode;
+  intra_mode_t intra_mode = block_param->intra_mode;
+  mv_t mvp = block_info->mvp;
+  int coeff_type = (mode == MODE_INTRA) << 1;
 
   start_bits = get_bit_pos(stream);
 
@@ -417,193 +386,175 @@ int write_block(stream_t *stream,write_data_t *write_data){
 
 
   /* Write mode and ref_idx */
-  write_super_mode(stream,write_data);
+  int split_flag = 0;
+  write_super_mode(stream, encoder_info, block_info, block_param, split_flag);
 
-  if (size==MAX_BLOCK_SIZE && mode != MODE_SKIP && write_data->max_delta_qp){
-    write_delta_qp(stream,write_data->delta_qp);
+  if (size == MAX_BLOCK_SIZE && mode != MODE_SKIP && (encoder_info->params->max_delta_qp || encoder_info->params->bitrate)) {
+    write_delta_qp(stream, block_info->delta_qp);
   }
-
   /* Code intra mode */
   if (mode==MODE_INTRA){
-    if (write_data->num_intra_modes<=4){
+    if (encoder_info->frame_info.num_intra_modes <= 4) {
       putbits(2,intra_mode,stream);
     }
-    else if (write_data->num_intra_modes <= 8){
-      putbits(3,intra_mode,stream);
-    }
-    else if (write_data->num_intra_modes <= 10){
-#if LIMIT_INTRA_MODES
+    else if (encoder_info->frame_info.num_intra_modes <= 8) {
       int intra_mode_map[MAX_NUM_INTRA_MODES] = {2,8,1,0,5,9,7,6,4,3};
+      int len[8] = {2,2,2,4,4,4,5,5};
+      int codeword[8] = {0,1,2,12,13,14,30,31};
       int code = intra_mode_map[intra_mode];
-      assert (code<8);
-      if (code==0){
-        putbits(2,0,stream);
-      }
-      else if(code==1){
-         putbits(2,1,stream);
-      }
-      else if(code==2){
-         putbits(2,2,stream);
-      }
-      else if(code==3){
-         putbits(4,12,stream);
-      }
-      else if(code==4){
-         putbits(4,13,stream);
-      }
-      else if(code==5){
-         putbits(4,14,stream);
-      }
-      else if(code==6){
-         putbits(5,30,stream);
-      }
-      else if(code==7){
-         putbits(5,31,stream);
-      }
-#else
+      assert(code<8);
+      putbits(len[code], codeword[code], stream);
+    }
+    else if (encoder_info->frame_info.num_intra_modes <= MAX_NUM_INTRA_MODES) {
       int intra_mode_map[MAX_NUM_INTRA_MODES] = {2,3,1,0,6,9,8,7,5,4};
+      int len[MAX_NUM_INTRA_MODES] = {2,2,3,3,4,4,5,5,5,5};
+      int codeword[MAX_NUM_INTRA_MODES] = {2,3,2,3,2,3,0,1,2,3};
       int code = intra_mode_map[intra_mode];
-      if (code==0){
-        putbits(2,2,stream);
-      }
-      else if(code==1){
-         putbits(2,3,stream);
-      }
-      else if(code==2){
-         putbits(3,2,stream);
-      }
-      else if(code==3){
-         putbits(3,3,stream);
-      }
-      else if(code==4){
-         putbits(4,2,stream);
-      }
-      else if(code==5){
-         putbits(4,3,stream);
-      }
-      else if(code==6){
-         putbits(5,0,stream);
-      }
-      else if(code==7){
-         putbits(5,1,stream);
-      }
-      else if(code==8){
-         putbits(5,2,stream);
-      }
-      else if(code==9){
-         putbits(5,3,stream);
-      }
-#endif
+      assert(code<MAX_NUM_INTRA_MODES);
+      putbits(len[code], codeword[code], stream);
     }
   }
   else if (mode==MODE_INTER){
     /* Code PU partitions */
-    if (write_data->max_num_pb_part > 1){
-      if (write_data->pb_part==0)
-        putbits(1,1,stream);
-      else if(write_data->pb_part==1)
-        putbits(2,1,stream);
-      else if(write_data->pb_part==2)
-        putbits(3,1,stream);
-      else if(write_data->pb_part==3)
-        putbits(3,0,stream);
+    if (block_info->max_num_pb_part > 1) {
+      if (block_param->pb_part == 0)
+        putbits(1, 1, stream);
+      else if (block_param->pb_part == 1)
+        putbits(2, 1, stream);
+      else if (block_param->pb_part == 2)
+        putbits(3, 1, stream);
+      else if (block_param->pb_part == 3)
+        putbits(3, 0, stream);
     }
     /* Code motion vectors for each prediction block */
     mv_t mvp2 = mvp;
-#if TWO_MVP
-    if (write_data->mv_idx >= 0){
-      putbits(1,write_data->mv_idx,stream);
+    if (block_param->pb_part == PART_NONE) { //NONE
+      write_mv(stream, &block_param->mv_arr0[0], &mvp2);
     }
-#endif
-    if (write_data->pb_part==PART_NONE){ //NONE
-      write_mv(stream,&write_data->mv_arr[0],&mvp2);
+    else if (block_param->pb_part == PART_HOR) { //HOR
+      write_mv(stream, &block_param->mv_arr0[0], &mvp2);
+      mvp2 = block_param->mv_arr0[0];
+      write_mv(stream, &block_param->mv_arr0[2], &mvp2);
     }
-    else if (write_data->pb_part==PART_HOR){ //HOR
-      write_mv(stream,&write_data->mv_arr[0],&mvp2);
-      mvp2 = write_data->mv_arr[0];
-      write_mv(stream,&write_data->mv_arr[2],&mvp2);
+    else if (block_param->pb_part == PART_VER) { //VER
+      write_mv(stream, &block_param->mv_arr0[0], &mvp2);
+      mvp2 = block_param->mv_arr0[0];
+      write_mv(stream, &block_param->mv_arr0[1], &mvp2);
     }
-    else if (write_data->pb_part==PART_VER){ //VER
-      write_mv(stream,&write_data->mv_arr[0],&mvp2);
-      mvp2 = write_data->mv_arr[0];
-      write_mv(stream,&write_data->mv_arr[1],&mvp2);
-    }
-    else{
-      write_mv(stream,&write_data->mv_arr[0],&mvp2);
-      mvp2 = write_data->mv_arr[0];
-      write_mv(stream,&write_data->mv_arr[1],&mvp2);
-      write_mv(stream,&write_data->mv_arr[2],&mvp2);
-      write_mv(stream,&write_data->mv_arr[3],&mvp2);
+    else {
+      write_mv(stream, &block_param->mv_arr0[0], &mvp2);
+      mvp2 = block_param->mv_arr0[0];
+      write_mv(stream, &block_param->mv_arr0[1], &mvp2);
+      write_mv(stream, &block_param->mv_arr0[2], &mvp2);
+      write_mv(stream, &block_param->mv_arr0[3], &mvp2);
     }
   }
   else if (mode==MODE_BIPRED){
-#if TWO_MVP
-    if (write_data->mv_idx >= 0){
-      putbits(1,write_data->mv_idx,stream);
+#if BIPRED_PART
+    /* Code PU partitions */
+    if (block_info->max_num_pb_part > 1) {
+      if (block_param->pb_part == 0)
+        putbits(1, 1, stream);
+      else if (block_param->pb_part == 1)
+        putbits(2, 1, stream);
+      else if (block_param->pb_part == 2)
+        putbits(3, 1, stream);
+      else if (block_param->pb_part == 3)
+        putbits(3, 0, stream);
     }
 #endif
+
     /* Code motion vectors for each prediction block */
-    mv_t mvp2 = mvp; //TODO: Use different predictors for mv0 and mv1
-    write_mv(stream,&write_data->mv_arr0[0],&mvp2); //TODO: Make bipred and pb-split combination work
-    write_mv(stream,&write_data->mv_arr1[0],&mvp2);
-    if (write_data->num_ref==2){
-      int code = 2*write_data->ref_idx1 + write_data->ref_idx0;
-      if (code==3)
-        putbits(3,0,stream);
-      else
-        putbits(code+1,1,stream);
+    mv_t mvp2 = mvp;
+    if (block_param->pb_part == PART_NONE) { //NONE
+      write_mv(stream, &block_param->mv_arr0[0], &mvp2);
     }
-    else{
-      int code = 4*write_data->ref_idx1 + write_data->ref_idx0; //TODO: Optimize for num_ref != 4
-      put_vlc(10,code,stream);
+    if (encoder_info->frame_info.frame_type == B_FRAME)
+      mvp2 = block_param->mv_arr0[0];
+    if (block_param->pb_part == PART_NONE) { //NONE
+      write_mv(stream, &block_param->mv_arr1[0], &mvp2);
+    }
+    else if (block_param->pb_part == PART_HOR) { //HOR
+      write_mv(stream, &block_param->mv_arr1[0], &mvp2);
+      mvp2 = block_param->mv_arr1[0];
+      write_mv(stream, &block_param->mv_arr1[2], &mvp2);
+    }
+    else if (block_param->pb_part == PART_VER) { //VER
+      write_mv(stream, &block_param->mv_arr1[0], &mvp2);
+      mvp2 = block_param->mv_arr1[0];
+      write_mv(stream, &block_param->mv_arr1[1], &mvp2);
+    }
+    else {
+      write_mv(stream, &block_param->mv_arr1[0], &mvp2);
+      mvp2 = block_param->mv_arr1[0];
+      write_mv(stream, &block_param->mv_arr1[1], &mvp2);
+      write_mv(stream, &block_param->mv_arr1[2], &mvp2);
+      write_mv(stream, &block_param->mv_arr1[3], &mvp2);
+    }
+
+    if (encoder_info->frame_info.frame_type == P_FRAME) {
+      if (encoder_info->frame_info.num_ref==2) {
+        int code = 2 * block_param->ref_idx0 + block_param->ref_idx1;
+        if (code==3)
+          putbits(3,0,stream);
+        else
+          putbits(code+1,1,stream);
+      }
+      else {
+        int code = 4 * block_param->ref_idx0 + block_param->ref_idx1; //TODO: Optimize for num_ref != 4
+        put_vlc(10, code, stream);
+      }
     }
   }
   else if (mode==MODE_SKIP){
     /* Code skip_idx */
-    if (write_data->num_skip_vec == 4)
-      putbits(2,write_data->skip_idx,stream);
-    else if (write_data->num_skip_vec == 3){
-      if (write_data->skip_idx == 0) putbits(1,1,stream);
-      else if (write_data->skip_idx == 1) putbits(2,0,stream);
-      else putbits(2,1,stream);
+    if (block_info->num_skip_vec == 4)
+      putbits(2, block_param->skip_idx, stream);
+    else if (block_info->num_skip_vec == 3) {
+      if (block_param->skip_idx == 0) putbits(1, 1, stream);
+      else if (block_param->skip_idx == 1) putbits(2, 0, stream);
+      else putbits(2, 1, stream);
     }
-    else if (write_data->num_skip_vec == 2){
-      putbits(1,write_data->skip_idx,stream);
+    else if (block_info->num_skip_vec == 2) {
+      putbits(1, block_param->skip_idx, stream);
     }
   }
   else if (mode==MODE_MERGE){
     /* Code skip_idx */
-    if (write_data->num_skip_vec == 4)
-      putbits(2,write_data->skip_idx,stream);
-    else if (write_data->num_skip_vec == 3){
-      if (write_data->skip_idx == 0) putbits(1,1,stream);
-      else if (write_data->skip_idx == 1) putbits(2,0,stream);
-      else putbits(2,1,stream);
+    if (block_info->num_merge_vec == 4)
+      putbits(2, block_param->skip_idx, stream);
+    else if (block_info->num_merge_vec == 3) {
+      if (block_param->skip_idx == 0) putbits(1, 1, stream);
+      else if (block_param->skip_idx == 1) putbits(2, 0, stream);
+      else putbits(2, 1, stream);
     }
-    else if (write_data->num_skip_vec == 2){
-      putbits(1,write_data->skip_idx,stream);
+    else if (block_info->num_merge_vec == 2) {
+      putbits(1, block_param->skip_idx, stream);
     }
   }
 
   if (mode != MODE_SKIP){
-    if (write_data->max_num_tb_part>1){
-      if (tb_split){
+    int max_num_tb_part = 1;
+    if (mode == MODE_MERGE || mode == MODE_BIPRED)
+      max_num_tb_part = 1;
+    else if (mode == MODE_INTER)
+      max_num_tb_part = block_info->max_num_tb_part > 1 ? 2 : 1;
+    else if (mode == MODE_INTRA)
+      max_num_tb_part = block_info->max_num_tb_part;
+    if (max_num_tb_part>1) {
+      if (tb_split) {
         code = 2;
       }
-      else{
-        cbp = cbp_y + (cbp_u<<1) + (cbp_v<<2);
+      else {
+        cbp = cbp_y + (cbp_u << 1) + (cbp_v << 2);
         code = cbp_table[cbp];
-        if (write_data->block_context->cbp==0 && code < 2)
-          code = 1-code;
+        if (block_info->block_context->cbp == 0 && code < 2)
+          code = 1 - code;
         if (code > 1) code++;
       }
     }
     else{
-#if NO_SUBBLOCK_SKIP
-      if (0){
-#else
       if (mode==MODE_MERGE){
-#endif
         cbp = cbp_y + (cbp_u<<1) + (cbp_v<<2);
         code = cbp_table[cbp];
         if (code==1)
@@ -614,7 +565,7 @@ int write_block(stream_t *stream,write_data_t *write_data){
       else{
         cbp = cbp_y + (cbp_u<<1) + (cbp_v<<2);
         code = cbp_table[cbp];
-        if (write_data->block_context->cbp==0 && code < 2){
+        if (block_info->block_context->cbp == 0 && code < 2) {
           code = 1-code;
         }
       }
@@ -623,57 +574,55 @@ int write_block(stream_t *stream,write_data_t *write_data){
 
     if (tb_split==0){
       if (cbp_y){
-        write_coeff(stream,coeffq_y,size,0);
+        write_coeff(stream,coeffq_y,size,coeff_type|0);
       }
       if (cbp_u){
-        write_coeff(stream,coeffq_u,size/2,1);
+        write_coeff(stream,coeffq_u,size/2,coeff_type|1);
       }
       if (cbp_v){
-        write_coeff(stream,coeffq_v,size/2,1);
+        write_coeff(stream,coeffq_v,size/2,coeff_type|1);
       }
     }
     else{
       if (size > 8){
         int index;
         for (index=0;index<4;index++){
-          cbp_y = ((write_data->cbp->y)>>(3-index))&1;
-          cbp_u = ((write_data->cbp->u)>>(3-index))&1;
-          cbp_v = ((write_data->cbp->v)>>(3-index))&1;
-
+          cbp_y = ((block_param->cbp.y) >> (3 - index)) & 1;
+          cbp_u = ((block_param->cbp.u) >> (3 - index)) & 1;
+          cbp_v = ((block_param->cbp.v) >> (3 - index)) & 1;
           /* Code cbp separately for each TU */
           int cbp = cbp_y + (cbp_u<<1) + (cbp_v<<2);
           code = cbp_table[cbp];
-          if (write_data->block_context->cbp==0 && code < 2)
+          if (block_info->block_context->cbp == 0 && code < 2)
             code = 1-code;
           put_vlc(0,code,stream);
 
           /* Code coefficients for each TU separately */
-          coeffq_y = write_data->coeffq_y + index*(size/2)*(size/2);
-          coeffq_u = write_data->coeffq_u + index*(size/4)*(size/4);
-          coeffq_v = write_data->coeffq_v + index*(size/4)*(size/4);
+          coeffq_y = block_param->coeff_y + index*(size / 2)*(size / 2);
+          coeffq_u = block_param->coeff_u + index*(size / 4)*(size / 4);
+          coeffq_v = block_param->coeff_v + index*(size / 4)*(size / 4);
           if (cbp_y){
-            write_coeff(stream,coeffq_y,size/2,0);
+            write_coeff(stream,coeffq_y,size/2,coeff_type|0);
           }
           if (cbp_u){
-            write_coeff(stream,coeffq_u,size/4,1);
+            write_coeff(stream,coeffq_u,size/4,coeff_type|1);
           }
           if (cbp_v){
-            write_coeff(stream,coeffq_v,size/4,1);
+            write_coeff(stream,coeffq_v,size/4,coeff_type|1);
           }
         } //for index=
       } //if (size > 8)
       else{
         int index;
         for (index=0;index<4;index++){
-          cbp_y = ((write_data->cbp->y)>>(3-index))&1;
-
+          cbp_y = ((block_param->cbp.y) >> (3 - index)) & 1;
           /* Code cbp_y separately for each TU */
           putbits(1,cbp_y,stream);
 
           /* Code coefficients for each TU separately */
-          coeffq_y = write_data->coeffq_y + index*(size/2)*(size/2);
+          coeffq_y = block_param->coeff_y + index*(size / 2)*(size / 2);
           if (cbp_y){
-            write_coeff(stream,coeffq_y,size/2,0);
+            write_coeff(stream,coeffq_y,size/2,coeff_type|0);
           }
         }
         cbp = cbp_u + 2*cbp_v;
@@ -686,10 +635,10 @@ int write_block(stream_t *stream,write_data_t *write_data){
         else
           putbits(3,0,stream);
         if (cbp_u){
-          write_coeff(stream,coeffq_u,size/2,1);
+          write_coeff(stream,coeffq_u,size/2,coeff_type|1);
         }
         if (cbp_v){
-          write_coeff(stream,coeffq_v,size/2,1);
+          write_coeff(stream,coeffq_v,size/2,coeff_type|1);
         }
       } //if (size > 8)
     } //if (tb_split==0

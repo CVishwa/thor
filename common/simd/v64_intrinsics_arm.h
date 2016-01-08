@@ -414,12 +414,20 @@ SIMD_INLINE v64 v64_cmpgt_s8(v64 x, v64 y) {
   return vreinterpret_s64_u8(vcgt_s8(vreinterpret_s8_s64(x), vreinterpret_s8_s64(y)));
 }
 
+SIMD_INLINE v64 v64_cmplt_s8(v64 x, v64 y) {
+  return vreinterpret_s64_u8(vclt_s8(vreinterpret_s8_s64(x), vreinterpret_s8_s64(y)));
+}
+
 SIMD_INLINE v64 v64_cmpeq_8(v64 x, v64 y) {
   return vreinterpret_s64_u8(vceq_u8(vreinterpret_u8_s64(x), vreinterpret_u8_s64(y)));
 }
 
 SIMD_INLINE v64 v64_cmpgt_s16(v64 x, v64 y) {
   return vreinterpret_s64_u16(vcgt_s16(vreinterpret_s16_s64(x), vreinterpret_s16_s64(y)));
+}
+
+SIMD_INLINE v64 v64_cmplt_s16(v64 x, v64 y) {
+  return vreinterpret_s64_u16(vclt_s16(vreinterpret_s16_s64(x), vreinterpret_s16_s64(y)));
 }
 
 SIMD_INLINE v64 v64_cmpeq_16(v64 x, v64 y) {
